@@ -1,0 +1,864 @@
+molconvert — Command Reference
+==============================
+
+SETUP
+-----
+Requirements:
+    - Python 3.9 or newer  (check with: python --version)
+    - pip (comes with Python)
+
+Install the package (run once, from inside the molconvert/ folder):
+    cd molconvert
+    pip install -e .
+
+This automatically installs all dependencies:
+    numpy, biopython, rdkit
+
+After install, two commands become available everywhere in the terminal:
+    convert     — format conversion
+    rmsd        — structural comparison
+
+To verify the install worked:
+    convert --help
+    rmsd --help
+
+
+==============================
+ARCHITECTURE
+==============================
+
+JSON is always the internal intermediate representation (IR).
+ZMAT is the external representation for internal coordinates.
+
+    Input formats          Core IR (JSON)          Output formats
+    ─────────────          ──────────────          ──────────────
+    PDB  ────────►  ┌──────────────────────┐  ────►  PDB
+    SDF  ────────►  │   MoleculeIC         │  ────►  SDF
+    ZMAT ────────►  │  (in-memory / JSON)  │  ────►  ZMAT
+                    └──────────────────────┘  ────►  JSON (internal)
+
+Input format is auto-detected from file extension (.pdb, .sdf, or .zmat).
+
+Bond connectivity in SDF output is inferred from interatomic distances
+using standard covalent radii (30 % tolerance). All bonds are written as
+single (type 1) — bond-order information is not preserved in the IC
+representation.
+
+
+==============================
+CLI COMMANDS
+==============================
+
+1. CONVERT — PDB to JSON (internal coordinates)
+------------------------------------------------
+    convert input.pdb
+    convert input.pdb --to json
+
+    What it does:
+        Reads the PDB file and outputs internal coordinates (bond lengths,
+        bond angles, dihedrals) for every atom as a JSON file.
+        The first 3 atoms are "anchors" — they have no IC, just XYZ positions.
+        Atom 4 onwards has full IC: bond_length + bond_angle + dihedral.
+        Each atom also carries bond_to / angle_to / dihedral_to reference
+        indices (1-based positions) used by the ZMAT converter.
+
+    Example output:
+        {
+          "name": "mini_A",
+          "atoms": [
+            { "atom_name": "N",  "bond_length": null,  "bond_angle": null,  "dihedral": null,
+              "bond_to": null,  "angle_to": null,  "dihedral_to": null  },
+            { "atom_name": "CA", "bond_length": 1.458, "bond_angle": null,  "dihedral": null,
+              "bond_to": 1,     "angle_to": null,  "dihedral_to": null  },
+            { "atom_name": "C",  "bond_length": 1.523, "bond_angle": 111.2, "dihedral": null,
+              "bond_to": 2,     "angle_to": 1,     "dihedral_to": null  },
+            { "atom_name": "O",  "bond_length": 1.235, "bond_angle": 120.9, "dihedral": 0.0,
+              "bond_to": 3,     "angle_to": 2,     "dihedral_to": 1     },
+            ...
+          ]
+        }
+
+
+2. CONVERT — PDB to SDF                                        *** NEW ***
+--------------------------------------------------------------------------
+    convert input.pdb --to sdf
+    convert input.pdb --to sdf -o output.sdf
+
+    What it does:
+        Reads the PDB file, converts to internal coordinates, then writes
+        an SDF V2000 file. Bond connectivity is inferred automatically from
+        interatomic distances. All bond orders are written as 1 (single).
+
+    Example output (output.sdf):
+        input_A
+             molconvert          3D
+
+        304310  0  0  0  0  0  0  0  0999 V2000
+           -8.9010    4.1270   -0.5550 N   0  0  0  0  0  0  0  0  0  0  0  0
+           -8.6080    3.1350   -1.6180 C   0  0  0  0  0  0  0  0  0  0  0  0
+           ...
+          1  2  1  0
+          2  3  1  0
+          ...
+        M  END
+        $$$$
+
+
+3. CONVERT — SDF to PDB                                        *** NEW ***
+--------------------------------------------------------------------------
+    convert molecule.sdf --to pdb
+    convert molecule.sdf --to pdb -o output.pdb
+
+    What it does:
+        Reads all molecule records from an SDF file, converts each to
+        internal coordinates, reconstructs Cartesian positions via NeRF,
+        and writes a PDB file. Multiple molecules are wrapped in
+        MODEL / ENDMDL records.
+
+
+4. CONVERT — SDF to SDF (round-trip / re-export)               *** NEW ***
+---------------------------------------------------------------------------
+    convert molecule.sdf --to sdf
+    convert molecule.sdf --to sdf -o output.sdf
+
+    What it does:
+        Reads an SDF, passes each molecule through the IC pipeline, and
+        re-exports as SDF. Bond counts are preserved. Useful for
+        normalising coordinates or stripping hydrogens (--remove-hydrogens).
+
+
+5. CONVERT — SDF with hydrogens stripped                       *** NEW ***
+---------------------------------------------------------------------------
+    convert molecule.sdf --to pdb --remove-hydrogens
+    convert molecule.sdf --to sdf --remove-hydrogens
+
+    What it does:
+        Strips hydrogen atoms during SDF parsing before any conversion.
+        Affects all output formats when input is .sdf.
+
+
+6. CONVERT — PDB to ZMAT (Z-matrix)                            *** NEW ***
+---------------------------------------------------------------------------
+    convert input.pdb --to zmat
+    convert input.pdb --to zmat -o output.zmat
+
+    What it does:
+        Reads the PDB, converts to internal coordinates (JSON IR internally),
+        then exports as a Z-matrix file.
+        ZMAT is the external representation of internal coordinates.
+        Anchor atom Cartesian positions are stored in the file header so
+        the ZMAT is self-contained for a full round-trip back to PDB.
+
+    Example output (output.zmat):
+        ZMAT input_A
+        # source_fmt pdb
+        # n_atoms 304
+        # anchor 1    -8.901000     4.127000    -0.555000
+        # anchor 2    -8.608000     3.135000    -1.618000
+        # anchor 3    -7.117000     2.964000    -1.897000
+           1  N     ASN  A     1
+           2  CA    ASN  A     1     1    1.483200
+           3  C     ASN  A     1     2    1.526487     1   113.507460
+           4  O     ASN  A     1     3    1.223043     2   117.845536     1  -121.197001
+           ...
+        END
+
+    ZMAT column layout (atom 4 onwards):
+        <idx>  <name>  <resname>  <chain>  <resseq>
+               <bond_to>  <bond_length>
+               <angle_to>  <bond_angle>
+               <dihedral_to>  <dihedral>
+
+
+3. CONVERT — ZMAT to PDB                                       *** NEW ***
+--------------------------------------------------------------------------
+    convert molecule.zmat --to pdb
+    convert molecule.zmat --to pdb -o rebuilt.pdb
+
+    What it does:
+        Reads a ZMAT file, converts it to MoleculeIC (JSON IR internally),
+        then uses the NeRF algorithm to reconstruct all atom Cartesian
+        positions and writes a PDB file.
+        Round-trip accuracy: RMSD < 0.00001 A vs the original PDB.
+
+
+4. CONVERT — ZMAT to internal JSON                             *** NEW ***
+--------------------------------------------------------------------------
+    convert molecule.zmat --to internal
+    convert molecule.zmat --to json
+
+    What it does:
+        Reads a ZMAT file and outputs the MoleculeIC as JSON (the internal
+        IR). Useful for inspecting or editing internal coordinates before
+        further conversion. "internal" and "json" are equivalent.
+
+
+5. CONVERT — PDB to reconstructed PDB
+--------------------------------------
+    convert input.pdb --to pdb
+
+    What it does:
+        Reads the PDB, converts it to internal coordinates, then uses the
+        NeRF algorithm to rebuild all atom positions from scratch.
+        The output is a new PDB file reconstructed purely from IC values.
+
+
+6. CONVERT — save output to a file
+------------------------------------
+    convert input.pdb -o output.json
+    convert input.pdb --to pdb -o rebuilt.pdb
+    convert input.pdb --to zmat -o output.zmat
+    convert molecule.zmat --to pdb -o rebuilt.pdb
+
+    What it does:
+        Instead of printing to the screen, writes the result to a file.
+
+
+7. CONVERT — single chain only
+--------------------------------
+    convert input.pdb --chain A
+
+    What it does:
+        If the PDB has multiple chains (A, B, C...), only processes chain A.
+        (PDB input only; ignored for .zmat input)
+
+
+8. CONVERT — include ligands (HETATM records)
+----------------------------------------------
+    convert input.pdb --include-hetatm
+
+    What it does:
+        Also processes ligand/small molecule records in the PDB (HETATM lines),
+        not just the protein backbone (ATOM lines).
+        (PDB input only)
+
+
+9. CONVERT — show IC statistics
+---------------------------------
+    convert input.pdb --summary
+    convert molecule.zmat --to pdb --summary
+
+    What it does:
+        After conversion, prints a summary of the IC values to the screen:
+            Bond lengths (A) : mean=1.612  std=0.373  [1.235, 2.231]
+            Bond angles  (°) : mean=88.13  std=39.71  [32.25, 120.93]
+            Dihedrals    (°) : mean=90.00  std=90.00  [0.00, 180.00]
+
+
+RMSD — Kabsch superposition (default behaviour)
+------------------------------------------------
+    The rmsd command uses the Kabsch algorithm by default.
+    This finds the optimal translation and rotation that minimises the RMSD
+    between the two structures before computing it, so results are independent
+    of how the structures are oriented or positioned in space.
+    This is the same method used by PyMOL, VMD, and standard bioinformatics tools.
+
+    To skip superposition and compare raw coordinates as-is, add --no-superpose:
+        rmsd structure1.pdb structure2.pdb --no-superpose
+
+
+10. RMSD — round-trip accuracy test (one file)
+----------------------------------------------
+    rmsd input.pdb --self
+    rmsd input.pdb --self --no-superpose
+
+    What it does:
+        Parses the PDB, reconstructs it from IC, then measures the Kabsch RMSD
+        between original and reconstructed.  For a perfect round-trip both
+        give 0.0000 A; --no-superpose skips alignment (useful to verify the
+        structures share the same reference frame).
+
+    Example output:
+        RMSD: 0.0000 Å
+          input.pdb (original)
+          input.pdb (reconstructed)
+
+
+11. RMSD — compare two PDB files
+---------------------------------
+    rmsd structure1.pdb structure2.pdb
+
+    What it does:
+        Superposes structure1 onto structure2 using the Kabsch algorithm, then
+        reports the RMSD.  Removes the effect of global translation and rotation
+        so you measure actual structural difference, not coordinate-frame offset.
+
+
+12. RMSD — filter by atom name (e.g. CA only)
+---------------------------------------------
+    rmsd structure1.pdb structure2.pdb --filter CA
+    rmsd input.pdb --self --filter N,CA,C
+
+    What it does:
+        Only compares specific atoms. Common filters:
+            CA        → alpha-carbon only (backbone trace)
+            N,CA,C    → backbone heavy atoms only
+        Kabsch superposition uses only the filtered atoms.
+
+
+13. RMSD — per-atom deviation table
+-------------------------------------
+    rmsd input.pdb --self --per-atom
+
+    What it does:
+        Shows how much each individual atom deviated after Kabsch superposition.
+
+    Example output:
+        RMSD: 0.0000 Å
+          input.pdb (original)
+          input.pdb (reconstructed)
+
+        Chain   Res  ResSeq  Atom   Dev (Å)
+        ------------------------------------
+            A   ALA       1     N    0.0000
+            A   ALA       1    CA    0.0000
+            A   ALA       1     C    0.0000
+        ------------------------------------
+        Max deviation: 0.0000 Å
+
+
+14. RMSD — disable superposition
+----------------------------------
+    rmsd structure1.pdb structure2.pdb --no-superpose
+
+    What it does:
+        Compares coordinates exactly as stored in the files, with no translation
+        or rotation applied.  Use this only when both structures are already in
+        the same reference frame (e.g. snapshots from the same simulation).
+
+
+==============================
+CONVERT — QUICK REFERENCE
+==============================
+
+    Input        --to        Description
+    ─────────────────────────────────────────────────────────────────────
+    .pdb         json        PDB → internal coordinates (JSON)    [default]
+    .pdb         pdb         PDB → reconstructed PDB (via IC)
+    .pdb         sdf         PDB → SDF (bonds inferred)           [NEW]
+    .pdb         zmat        PDB → Z-matrix
+    .pdb         internal    alias for json
+    .sdf         pdb         SDF → PDB                            [NEW]
+    .sdf         sdf         SDF → SDF (round-trip / re-export)   [NEW]
+    .sdf         json        SDF → internal coordinates (JSON)    [NEW]
+    .sdf         zmat        SDF → Z-matrix                       [NEW]
+    .sdf         internal    alias for json                        [NEW]
+    .zmat        pdb         ZMAT → reconstructed PDB
+    .zmat        sdf         ZMAT → SDF (bonds inferred)          [NEW]
+    .zmat        json        ZMAT → internal coordinates (JSON)
+    .zmat        internal    alias for json
+
+    SDF-only flags:
+        --remove-hydrogens    strip H atoms during SDF parsing    [NEW]
+
+
+==============================
+PYTHON API (use in your code)
+==============================
+
+    from molconvert.parsers.pdb_parser import parse_pdb
+    from molconvert.parsers.sdf_parser import parse_sdf
+    from molconvert.builders.reconstruct import reconstruct, to_pdb, save_pdb
+    from molconvert.builders.to_sdf import molecule_to_sdf, save_sdf, molecules_to_sdf, save_sdf_multi
+    from molconvert.converters.json_to_zmat import molecule_to_zmat, save_zmat
+    from molconvert.converters.zmat_to_json import zmat_to_molecule, load_zmat
+    from molconvert.analysis import (
+        kabsch_superpose, kabsch_rmsd,
+        rmsd_molecules, per_atom_deviation, ic_summary,
+    )
+
+    # Parse a PDB file
+    molecules = parse_pdb("input.pdb")
+    mol = molecules[0]
+
+    # Parse an SDF file (can contain many molecules)
+    mols = parse_sdf("compounds.sdf")
+    mols = parse_sdf("compounds.sdf", remove_hydrogens=True)   # heavy atoms only
+
+    # Reconstruct Cartesian coords from IC
+    mol_rebuilt = reconstruct(mol)
+
+    # Export as PDB
+    pdb_text = to_pdb(mol_rebuilt)
+    save_pdb(mol_rebuilt, "rebuilt.pdb")
+
+    # Export as SDF (bonds inferred from distances)
+    sdf_text = molecule_to_sdf(mol)              # single molecule → string
+    save_sdf(mol, "output.sdf")                  # single molecule → file
+    sdf_text = molecules_to_sdf(mols)            # multiple molecules → string
+    save_sdf_multi(mols, "output_multi.sdf")     # multiple molecules → file
+
+    # Export internal coordinates as ZMAT
+    zmat_text = molecule_to_zmat(mol)          # returns string
+    save_zmat(mol, "output.zmat")              # writes file
+
+    # Load a ZMAT file back into the internal IR
+    mol = load_zmat("output.zmat")             # returns MoleculeIC
+    mol = zmat_to_molecule(zmat_text)          # parse from string
+
+    # Save IC as JSON
+    mol.save_json("molecule_ic.json")
+
+    # Compare two molecules (Kabsch superposition applied by default)
+    r = rmsd_molecules(mol, mol_rebuilt)                          # all atoms, Kabsch
+    r = rmsd_molecules(mol, mol_rebuilt, atom_filter=["CA"])      # CA only, Kabsch
+    r = rmsd_molecules(mol, mol_rebuilt, superpose=False)         # raw coords, no alignment
+
+    # Kabsch alignment and RMSD directly on coordinate arrays
+    coords_aligned = kabsch_superpose(coords1, coords2)           # returns aligned coords1
+    r = kabsch_rmsd(coords1, coords2)                             # RMSD after Kabsch
+
+    # Per-atom breakdown (Kabsch superposition applied before deviations)
+    deviations = per_atom_deviation(mol, mol_rebuilt)
+    deviations = per_atom_deviation(mol, mol_rebuilt, superpose=False)  # raw coords
+
+    # IC statistics
+    summary = ic_summary(mol)
+    print(summary)
+
+
+==============================
+RUN THE TESTS
+==============================
+
+    pytest tests/ -v
+
+    214 tests covering:
+        - geometry math  (bond length, angle, dihedral, NeRF)
+        - PDB parser
+        - SDF parser
+        - reconstruction builder
+        - RMSD analysis
+        - CLI commands
+        - ZMAT converter (json_to_zmat, zmat_to_json)
+        - ZMAT CLI paths (PDB→ZMAT, ZMAT→PDB, ZMAT→JSON)
+        - ZMAT round-trip accuracy
+        - SDF builder (to_sdf, bond inference)              [NEW]
+        - SDF↔PDB, SDF↔SDF, SDF↔ZMAT CLI paths            [NEW]
+        - PDB→SDF, ZMAT→SDF CLI paths                      [NEW]
+        - --remove-hydrogens flag                           [NEW]
+
+
+==============================
+HOW IT WORKS INTERNALLY
+==============================
+
+This section traces the complete call chain for every major operation —
+from the moment a command is typed to the final byte written to disk.
+
+──────────────────────────────
+1. ENTRY POINT — the CLI layer
+──────────────────────────────
+
+File: molconvert/cli/main.py
+
+When you run:
+    convert input.pdb --to zmat
+
+Python's setuptools wires the shell command "convert" to the function
+run_convert() via the entry_points in setup.py:
+    "convert=molconvert.cli.main:run_convert"
+
+run_convert() does four things in order:
+  a) Parses the command-line arguments with argparse.
+  b) Detects the input format from the file extension.
+  c) Loads the molecule(s) into the internal representation.
+  d) Converts and writes the output.
+
+
+──────────────────────────────────────────────────
+2. READING A PDB FILE — parse_pdb()
+──────────────────────────────────────────────────
+
+File: molconvert/parsers/pdb_parser.py
+Caller: run_convert() → parse_pdb(args.input)
+
+Call chain:
+  parse_pdb(path, model_id, include_hetatm)
+    └─ BioPython PDBParser().get_structure(path)
+         Returns a Structure object with chains of Residues of Atoms.
+    └─ _build_molecule_ic(chain_id, atoms_list)
+         Receives a flat list of Atom objects.
+         For every atom i (0-based index):
+
+           Position 0 (first atom):
+             bond_length = None   (no predecessor)
+             bond_angle  = None
+             dihedral    = None
+             bond_to     = None, angle_to = None, dihedral_to = None
+
+           Position 1 (second atom):
+             bond_length = bond_length(pos[0], pos[1])   ← geometry.py
+             bond_angle  = None
+             dihedral    = None
+             bond_to = 1, angle_to = None, dihedral_to = None
+
+           Position 2 (third atom):
+             bond_length = bond_length(pos[1], pos[2])
+             bond_angle  = bond_angle_deg(pos[0], pos[1], pos[2])
+             dihedral    = None
+             bond_to = 2, angle_to = 1, dihedral_to = None
+
+           Position i ≥ 3:
+             bond_length = bond_length(pos[i-1], pos[i])
+             bond_angle  = bond_angle_deg(pos[i-2], pos[i-1], pos[i])
+             dihedral    = dihedral_deg(pos[i-3], pos[i-2], pos[i-1], pos[i])
+             bond_to = i, angle_to = i-1, dihedral_to = i-2   (all 1-based)
+
+         Returns one MoleculeIC object per chain.
+
+
+──────────────────────────────────────────────────
+3. THE IC MATH — geometry functions
+──────────────────────────────────────────────────
+
+File: molconvert/core/geometry.py
+
+bond_length(a, b):
+    d = b - a                         # 3D vector
+    return sqrt(d·d)                  # Euclidean norm
+
+bond_angle_deg(a, b, c):
+    u = a - b                         # vector from b toward a
+    v = c - b                         # vector from b toward c
+    cos_θ = (u·v) / (|u| × |v|)
+    return degrees(arccos(clamp(cos_θ, -1, 1)))
+
+dihedral_deg(a, b, c, d):
+    b1 = b - a
+    b2 = c - b                        # central bond
+    b3 = d - c
+    n1 = b1 × b2                      # normal to first plane
+    n2 = b2 × b3                      # normal to second plane
+    m  = n1 × (b2 / |b2|)            # in-plane perpendicular
+    x  = n1·n2
+    y  = m·n2
+    return degrees(atan2(y, x))       # signed angle in [-180, 180]
+
+
+──────────────────────────────────────────────────
+4. READING AN SDF FILE — parse_sdf()
+──────────────────────────────────────────────────
+
+File: molconvert/parsers/sdf_parser.py
+Caller: run_convert() → parse_sdf(args.input, remove_hydrogens)
+
+Call chain:
+  parse_sdf(path, remove_hydrogens)
+    └─ RDKit SDMolSupplier(path, removeHs=remove_hydrogens)
+         Returns an iterator of RDKit Mol objects.
+    └─ For each RDKit Mol:
+         mol.GetConformer(0).GetAtomPosition(i) → (x, y, z) for every atom
+         Same IC computation as PDB parser (bond_length, bond_angle_deg,
+         dihedral_deg) using raw XYZ positions.
+         Element symbol read from atom.GetSymbol().
+         Returns MoleculeIC with source_fmt="sdf".
+
+
+──────────────────────────────────────────────────
+5. READING A ZMAT FILE — load_zmat() / zmat_to_molecule()
+──────────────────────────────────────────────────
+
+File: molconvert/converters/zmat_to_json.py
+Caller: run_convert() → load_zmat(args.input)
+
+Call chain:
+  load_zmat(path)
+    └─ reads file text → zmat_to_molecule(text)
+
+  zmat_to_molecule(text):
+    Parses line by line:
+
+    "ZMAT <name>"          → MoleculeIC.name
+    "# source_fmt <fmt>"   → MoleculeIC.source_fmt
+    "# n_atoms <n>"        → expected atom count (sanity check)
+    "# anchor <i> x y z"  → anchors dict: {i: (x, y, z)}
+    "END"                  → stop parsing
+
+    Data line for atom 1 (anchor, no IC):
+        "<idx>  <name>  <resname>  <chain>  <resseq>"
+        → AtomIC(bond_length=None, bond_angle=None, dihedral=None)
+        → cart_x/y/z filled from anchors dict
+
+    Data line for atom 2 (has bond only):
+        "<idx>  <name>  <resname>  <chain>  <resseq>
+         <bond_to>  <bond_length>"
+        → AtomIC(bond_length=float, bond_angle=None, dihedral=None)
+        → cart_x=None (set later by reconstruct)
+
+    Data line for atom i ≥ 4 (full IC):
+        "<idx> <name> <resname> <chain> <resseq>
+         <bond_to> <bond_length>  <angle_to> <bond_angle>
+         <dihedral_to> <dihedral>"
+        → AtomIC with all three IC values + reference indices
+        → cart_x=None
+
+    _element_from_name(atom_name):
+        Strips leading digits and returns first alphabetic character.
+        "CA" → "C",  "OD1" → "O",  "HG11" → "H"
+
+    Returns MoleculeIC. Positions for non-anchor atoms are not set yet;
+    reconstruct() fills them in.
+
+
+──────────────────────────────────────────────────
+6. RECONSTRUCTING POSITIONS — reconstruct()
+──────────────────────────────────────────────────
+
+File: molconvert/builders/reconstruct.py
+Caller: run_convert() → reconstruct(mol)  (for PDB/SDF output)
+        run_rmsd()    → reconstruct(mol1)  (for --self test)
+
+Call chain:
+  reconstruct(mol):
+    └─ deep copy of mol so the original is not mutated
+    └─ Build positions[] list:
+         Atom 0: positions[0] = (cart_x, cart_y, cart_z)   ← anchor, already set
+         Atom 1: positions[1] = (cart_x, cart_y, cart_z)   ← anchor, already set
+         Atom 2: positions[2] = (cart_x, cart_y, cart_z)   ← anchor, already set
+         Atom i ≥ 3:
+           positions[i] = place_atom(
+               positions[i-3],   # A  (dihedral reference)
+               positions[i-2],   # B  (angle reference)
+               positions[i-1],   # C  (bond reference)
+               atom.bond_length,
+               atom.bond_angle,
+               atom.dihedral,
+           )
+         Writes cart_x, cart_y, cart_z back to atom object.
+
+
+──────────────────────────────────────────────────
+7. THE NERF ALGORITHM — place_atom()
+──────────────────────────────────────────────────
+
+File: molconvert/core/geometry.py → place_atom(A, B, C, r, θ, φ)
+
+This is the mathematical core. Given three known atoms A, B, C and the
+IC values for the new atom D, it computes D's XYZ position.
+
+Step 1 — build the new atom position in a local coordinate frame:
+    bc   = (C - B) / |C - B|           # unit vector along B→C
+    nbc  = cross(B - A, bc)
+    nbc /= |nbc|                        # normal to the A-B-C plane
+    n    = cross(bc, nbc)               # completes the right-hand frame
+
+    r     = bond_length (Å)
+    θ     = bond_angle  (degrees) → radians
+    φ     = dihedral    (degrees) → radians
+
+    d_local = [
+        -r × cos(θ),
+         r × sin(θ) × cos(φ),
+         r × sin(θ) × sin(φ),
+    ]
+
+Step 2 — rotate to global frame:
+    M = column_stack([-bc, nbc, n])     # 3×3 rotation matrix
+    D = M @ d_local + C                 # global position of D
+
+The anchor atoms define the absolute position and orientation of the
+entire molecule. Every subsequent atom is placed relative to the three
+atoms before it, chained like links in a coordinate frame.
+
+
+──────────────────────────────────────────────────
+8. WRITING A ZMAT FILE — molecule_to_zmat()
+──────────────────────────────────────────────────
+
+File: molconvert/converters/json_to_zmat.py
+Caller: run_convert() → molecule_to_zmat(mol)
+
+Call chain:
+  molecule_to_zmat(mol) → str:
+    Header block:
+        "ZMAT <mol.name>\n"
+        "# source_fmt <mol.source_fmt>\n"
+        "# n_atoms <len(mol.atoms)>\n"
+        For each of the first 3 atoms (anchors) that have cart_x set:
+            "# anchor <i+1>   <x>   <y>   <z>\n"
+
+    Data lines (one per atom):
+        Atom 1 (anchor):
+            "   1  <name>  <resname>  <chain>  <resseq>\n"
+        Atom 2 (bond only):
+            "   2  <name>  <resname>  <chain>  <resseq>
+                  <bond_to>  <bond_length:.6f>\n"
+        Atom i ≥ 4 (full IC):
+            "   <i>  <name>  <resname>  <chain>  <resseq>
+                  <bond_to>  <bond_length:.6f>
+                  <angle_to>  <bond_angle:.6f>
+                  <dihedral_to>  <dihedral:.6f>\n"
+        "END\n"
+
+    Reference indices (bond_to, angle_to, dihedral_to) are read from
+    the AtomIC fields. If an atom was parsed from PDB/SDF, these are
+    already set (i, i-1, i-2). If from old JSON without these fields,
+    falls back to sequential defaults.
+
+
+──────────────────────────────────────────────────
+9. WRITING AN SDF FILE — molecule_to_sdf()
+──────────────────────────────────────────────────
+
+File: molconvert/builders/to_sdf.py
+Caller: run_convert() → molecule_to_sdf(mol_r)
+        (mol_r has positions set — either from parsing or from reconstruct)
+
+Call chain:
+  molecule_to_sdf(mol) → str:
+    Validation: raises ValueError if any non-anchor atom has no position.
+
+    bonds = _infer_bonds(atoms):
+        For every pair (i, j) with i < j:
+            dx = atoms[j].cart_x - atoms[i].cart_x
+            dy = atoms[j].cart_y - atoms[i].cart_y
+            dz = atoms[j].cart_z - atoms[i].cart_z
+            dist² = dx² + dy² + dz²
+            threshold² = (radii[i] + radii[j])² × 1.3²
+            if dist² < threshold²:
+                append (i+1, j+1, 1)   ← 1-based atom indices, bond type 1
+        Returns list of (a1, a2, bond_type) tuples.
+
+    Covalent radii from _COVALENT_RADII dict (Alvarez 2008 values, Å).
+    Unknown elements default to 1.5 Å radius.
+
+    SDF V2000 output structure:
+        Line 1: molecule name
+        Line 2: "     molconvert          3D"
+        Line 3: "" (blank comment)
+        Line 4: counts — f"{n_atoms:3d}{n_bonds:3d}  0  0  0  0  0  0  0  0999 V2000"
+        Lines 5..n_atoms+4: atom block
+            f"{x:10.4f}{y:10.4f}{z:10.4f} {element:<3s} ..."
+        Lines n_atoms+5..end: bond block
+            f"{a1:3d}{a2:3d}{bond_type:3d}  0"
+        "M  END"
+        "$$$$"
+
+
+──────────────────────────────────────────────────
+10. WRITING A PDB FILE — to_pdb()
+──────────────────────────────────────────────────
+
+File: molconvert/builders/reconstruct.py
+Caller: run_convert() → to_pdb(mol_r, model_id)
+
+Call chain:
+  to_pdb(mol, model_id) → str:
+    If model_id is not None, wraps output in MODEL/ENDMDL records.
+    For each atom:
+        _format_atom_record(atom, serial) → 80-character PDB ATOM line
+    Ends with "END".
+
+  _format_atom_record(atom, serial):
+    Standard PDB fixed-width format:
+        Columns  1- 6: record type  "ATOM  "
+        Columns  7-11: serial number (right-justified)
+        Columns 13-16: atom name
+        Columns 17   : alt location indicator (blank)
+        Columns 18-20: residue name
+        Columns 22   : chain ID
+        Columns 23-26: residue sequence number
+        Columns 31-38: x coordinate (8.3f)
+        Columns 39-46: y coordinate (8.3f)
+        Columns 47-54: z coordinate (8.3f)
+        Columns 77-78: element symbol
+
+
+──────────────────────────────────────────────────
+11. RMSD CALCULATION — rmsd_molecules()
+──────────────────────────────────────────────────
+
+File: molconvert/analysis/rmsd.py
+Caller: run_rmsd() or Python API
+
+Call chain:
+  rmsd_molecules(mol1, mol2, atom_filter):
+    └─ _extract_coords(mol1, atom_filter) → coords1  (N×3 numpy array)
+    └─ _extract_coords(mol2, atom_filter) → coords2
+    └─ if len(coords1) ≠ len(coords2): raise ValueError
+    └─ rmsd(coords1, coords2)
+
+  _extract_coords(mol, atom_filter):
+    Iterates mol.atoms; if atom_filter is set, skips atoms whose
+    atom_name is not in the filter list.
+    Returns numpy array of shape (N, 3).
+
+  rmsd(coords1, coords2):
+    diff    = coords1 - coords2          # N×3 array of Δx, Δy, Δz
+    sq_diff = diff ** 2                  # element-wise square
+    msd     = mean(sum(sq_diff, axis=1)) # mean of per-atom squared distances
+    return sqrt(msd)                     # root-mean-square deviation (Å)
+
+  per_atom_deviation(mol1, mol2, atom_filter):
+    Same coordinate extraction; returns a list of dicts:
+        {"chain_id": ..., "residue_name": ..., "residue_seq": ...,
+         "atom_name": ..., "deviation": sqrt(Δx²+Δy²+Δz²)}
+
+
+──────────────────────────────────────────────────
+12. COMPLETE EXAMPLE: convert input.pdb --to zmat -o out.zmat
+──────────────────────────────────────────────────
+
+  1. Shell → run_convert(["input.pdb", "--to", "zmat", "-o", "out.zmat"])
+  2. argparse: in=input.pdb, out_fmt=zmat, output=out.zmat
+  3. in_ext=".pdb" → in_fmt="pdb"
+  4. parse_pdb("input.pdb")
+       → BioPython reads ATOM records
+       → _build_molecule_ic() loops over every atom:
+            calls bond_length(), bond_angle_deg(), dihedral_deg()
+            stores IC + reference indices in AtomIC objects
+       → returns [MoleculeIC]  (one per chain)
+  5. For each MoleculeIC mol:
+       molecule_to_zmat(mol)
+         → writes header + anchor lines
+         → writes data lines with IC values
+         → returns ZMAT string
+  6. Join all ZMAT strings with "\n"
+  7. open("out.zmat", "w").write(output_text)
+  8. print("Wrote out.zmat", file=stderr)
+
+
+──────────────────────────────────────────────────
+13. COMPLETE EXAMPLE: convert molecule.zmat --to pdb -o rebuilt.pdb
+──────────────────────────────────────────────────
+
+  1. Shell → run_convert(["molecule.zmat", "--to", "pdb", "-o", "rebuilt.pdb"])
+  2. argparse: in=molecule.zmat, out_fmt=pdb, output=rebuilt.pdb
+  3. in_ext=".zmat" → in_fmt="zmat"
+  4. load_zmat("molecule.zmat")
+       → reads file text → zmat_to_molecule(text)
+       → parses anchor XYZ from "# anchor" lines
+       → parses IC values from data lines into AtomIC objects
+       → non-anchor atoms have cart_x=None
+       → returns MoleculeIC
+  5. reconstruct(mol)
+       → deep copy
+       → anchors: positions[0,1,2] from cart_x/y/z
+       → for i=3..N-1: place_atom(pos[i-3], pos[i-2], pos[i-1], r, θ, φ)
+            → builds local frame (bc, nbc, n)
+            → d_local from r, θ, φ
+            → M @ d_local + C → global XYZ
+       → writes cart_x/y/z into each atom
+  6. to_pdb(mol_r, model_id=None)
+       → _format_atom_record() for each atom → 80-char PDB lines
+       → returns PDB string
+  7. open("rebuilt.pdb", "w").write(output_text)
+
+
+──────────────────────────────────────────────────
+14. COMPLETE EXAMPLE: convert molecule.sdf --to pdb --remove-hydrogens
+──────────────────────────────────────────────────
+
+  1. Shell → run_convert(["molecule.sdf", "--to", "pdb", "--remove-hydrogens"])
+  2. argparse: in=molecule.sdf, out_fmt=pdb, remove_hydrogens=True
+  3. in_ext=".sdf" → in_fmt="sdf"
+  4. parse_sdf("molecule.sdf", remove_hydrogens=True)
+       → RDKit SDMolSupplier with removeHs=True
+       → hydrogen atoms stripped before conformer is read
+       → IC computed for remaining heavy atoms only
+       → returns [MoleculeIC, ...]
+  5. For each mol:
+       reconstruct(mol)   (positions already set from SDF parser — no-op)
+       to_pdb(mol_r, model_id=i+1)
+  6. Print MODEL/ATOM/ENDMDL blocks to stdout.

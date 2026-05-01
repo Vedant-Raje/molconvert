@@ -1,0 +1,3 @@
+[console_scripts]
+convert = molconvert.cli.main:run_convert
+rmsd = molconvert.cli.main:run_rmsd

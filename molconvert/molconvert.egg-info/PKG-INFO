@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: molconvert
+Version: 0.2.0
+Requires-Python: >=3.9
+Requires-Dist: numpy
+Requires-Dist: biopython
+Requires-Dist: rdkit
+Dynamic: requires-dist
+Dynamic: requires-python
